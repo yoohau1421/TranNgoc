@@ -33,21 +33,25 @@ namespace TranNgoc.Controllers
             });
         }
 
-        [HttpPost("check-excel")]
-        [Consumes("multipart/form-data")]
-        public async Task<IActionResult> CheckExcel([FromForm] ImportCompareExcelRequest request)
+        [HttpPost("review")]
+        public async Task<IActionResult> Review(IFormFile file, [FromForm] long objectId)
         {
-            var result = await _compareExcelService.CompareAsync(request.File, request.ObjectId);
+            var result = await _compareExcelService.CompareReview(file, objectId);
+            return Ok(result);
+        }
 
-            Response.Headers.Add("X-Message", Uri.EscapeDataString(result.Message));
-            Response.Headers.Add("X-Total-Rows", result.TotalRows.ToString());
-            Response.Headers.Add("X-Success-Rows", result.SuccessRows.ToString());
-            Response.Headers.Add("X-Error-Rows", result.ErrorRows.ToString());
+        [HttpPost("export")]
+        public async Task<IActionResult> Export(IFormFile file, [FromForm] long objectId)
+        {
+            var result = await _compareExcelService.ExportExcel(file, objectId);
+
+            if (!result.IsSuccess || result.Data == null)
+                return BadRequest(result);
 
             return File(
-                result.FileBytes,
+                result.Data.FileBytes,
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                result.FileName
+                result.Data.FileName
             );
         }
     }
