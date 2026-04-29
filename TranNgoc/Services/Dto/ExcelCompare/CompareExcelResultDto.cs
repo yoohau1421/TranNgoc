@@ -1,4 +1,4 @@
-﻿namespace TranNgoc.Services.Dto
+﻿namespace TranNgoc_BE.Services.Dto.ExcelCompare
 {
     public class CompareExcelResultDto
     {

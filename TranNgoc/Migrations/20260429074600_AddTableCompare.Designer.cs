@@ -3,6 +3,7 @@ using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using TranNgoc.Data;
 
@@ -11,9 +12,11 @@ using TranNgoc.Data;
 namespace TranNgoc.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260429074600_AddTableCompare")]
+    partial class AddTableCompare
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -96,8 +99,6 @@ namespace TranNgoc.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("TemplateId");
-
                     b.ToTable("CompareMasterData");
                 });
 
@@ -129,8 +130,6 @@ namespace TranNgoc.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("TemplateId");
-
                     b.ToTable("CompareRuleConfigs");
                 });
 
@@ -146,15 +145,15 @@ namespace TranNgoc.Migrations
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
 
-                    b.Property<bool>("IsActive")
-                        .HasColumnType("bit");
-
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
 
                     b.Property<long>("ObjectId")
                         .HasColumnType("bigint");
+
+                    b.Property<bool>("isActive")
+                        .HasColumnType("bit");
 
                     b.HasKey("Id");
 
@@ -192,51 +191,7 @@ namespace TranNgoc.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("TemplateId");
-
                     b.ToTable("CompareTemplateColumns");
-                });
-
-            modelBuilder.Entity("TranNgoc_BE.Models.CompareMasterData", b =>
-                {
-                    b.HasOne("TranNgoc_BE.Models.CompareTemplate", "Template")
-                        .WithMany("MasterDataRows")
-                        .HasForeignKey("TemplateId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Template");
-                });
-
-            modelBuilder.Entity("TranNgoc_BE.Models.CompareRuleConfig", b =>
-                {
-                    b.HasOne("TranNgoc_BE.Models.CompareTemplate", "Template")
-                        .WithMany("RuleConfigs")
-                        .HasForeignKey("TemplateId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Template");
-                });
-
-            modelBuilder.Entity("TranNgoc_BE.Models.CompareTemplateColumn", b =>
-                {
-                    b.HasOne("TranNgoc_BE.Models.CompareTemplate", "Template")
-                        .WithMany("Columns")
-                        .HasForeignKey("TemplateId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Template");
-                });
-
-            modelBuilder.Entity("TranNgoc_BE.Models.CompareTemplate", b =>
-                {
-                    b.Navigation("Columns");
-
-                    b.Navigation("MasterDataRows");
-
-                    b.Navigation("RuleConfigs");
                 });
 #pragma warning restore 612, 618
         }

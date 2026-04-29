@@ -1,12 +1,13 @@
 ﻿using TranNgoc.Services.Dto;
-using TranNgoc.Services.Dto.ExcelCompare;
+using TranNgoc_BE.Services.Dto.ExcelCompare;
 
-namespace TranNgoc.Services.Interfaces
+namespace TranNgoc_BE.Services.Interfaces
 {
     public interface ICompareExcelService
     {
-        Task<List<ImportCompareExcelRowDto>> ImportExcelAsync(IFormFile file);
+        Task<BaseResponse<DynamicComparePreviewResultDto>> CompareReview(IFormFile file, long objectId);
         Task<BaseResponse<CompareExcelResultDto>> ExportExcel(IFormFile file, long objectId);
-        Task<BaseResponse<ComparePreviewResultDto>> CompareReview(IFormFile file, long objectId);
+        Task<BaseResponse<List<CompareTemplateOptionDto>>> GetTemplateOptionsAsync();
+        Task<BaseResponse<CompareExcelResultDto>> DownloadSampleFile(long objectId);
     }
 }

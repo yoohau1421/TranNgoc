@@ -1,6 +1,6 @@
 ﻿namespace TranNgoc_BE.Models
 {
-    public class CompateTemplateColumn
+    public class CompareTemplateColumn
     {
         public long Id { get; set; }
         public long TemplateId { get; set; }
@@ -9,5 +9,6 @@
         public int ExcelIndex { get; set; }
         public string DataType { get; set; } = "text";
         public bool IsRequired { get; set; } = false;
+        public CompareTemplate Template { get; set; } = null!;
     }
 }

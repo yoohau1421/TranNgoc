@@ -1,13 +1,10 @@
 ﻿using System.ComponentModel.DataAnnotations;
 
-namespace TranNgoc.Services.Dto
+namespace TranNgoc_BE.Services.Dto.ExcelCompare
 {
-    public class ImportMasterDataRequest
+    public class ImportCompareExcelRequest
     {
-        [Required]
         public IFormFile File { get; set; } = null!;
-
-        [Required]
         public long ObjectId { get; set; }
     }
 }

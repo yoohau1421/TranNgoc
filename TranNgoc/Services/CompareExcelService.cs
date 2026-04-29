@@ -1,14 +1,15 @@
-﻿using Microsoft.EntityFrameworkCore;
+﻿
+using Microsoft.EntityFrameworkCore;
 using OfficeOpenXml;
-using OfficeOpenXml.Style;
-using System.Drawing;
+using System.Globalization;
+using System.Text.Json;
 using TranNgoc.Data;
-using TranNgoc.Models;
 using TranNgoc.Services.Dto;
-using TranNgoc.Services.Dto.ExcelCompare;
-using TranNgoc.Services.Interfaces;
+using TranNgoc_BE.Models;
+using TranNgoc_BE.Services.Dto.ExcelCompare;
+using TranNgoc_BE.Services.Interfaces;
 
-namespace TranNgoc.Services
+namespace TranNgoc_BE.Services
 {
     public class CompareExcelService : ICompareExcelService
     {
@@ -18,38 +19,104 @@ namespace TranNgoc.Services
         {
             _dbContext = dbContext;
         }
-        public async Task<BaseResponse<CompareExcelResultDto>> ExportExcel(IFormFile file, long objectId)
+        public async Task<BaseResponse<CompareExcelResultDto>> DownloadSampleFile(long objectId)
         {
             var response = new BaseResponse<CompareExcelResultDto>();
 
             try
             {
-                using var package = new ExcelPackage(file.OpenReadStream());
-                var sheet = package.Workbook.Worksheets.First();
+                var template = await GetTemplateAsync(objectId);
 
-                var rows = await ProcessCompare(sheet, objectId);
+                using var package = new ExcelPackage();
+                var sheet = package.Workbook.Worksheets.Add("File mẫu");
 
-                int resultCol = 8;
-                int errorCol = 9;
+                var columns = template.Columns
+                    .OrderBy(x => x.ExcelIndex)
+                    .ToList();
 
-                sheet.Cells[1, resultCol].Value = "Kết quả";
-                sheet.Cells[1, errorCol].Value = "Thông tin lỗi";
-
-                foreach (var row in rows)
+                foreach (var col in columns)
                 {
-                    var r = row.RowIndex;
-
-                    sheet.Cells[r, resultCol].Value = row.IsValid ? "Đúng" : "Sai";
-                    sheet.Cells[r, errorCol].Value = string.Join("; ", row.Errors);
+                    sheet.Cells[1, col.ExcelIndex].Value = col.ColumnName;
+                    sheet.Cells[1, col.ExcelIndex].Style.Font.Bold = true;
                 }
 
+                sheet.Cells[sheet.Dimension.Address].AutoFitColumns();
+
                 response.IsSuccess = true;
+                response.Message = "Tải file mẫu thành công";
                 response.Data = new CompareExcelResultDto
                 {
                     FileBytes = package.GetAsByteArray(),
-                    FileName = $"ket-qua-{DateTime.Now:yyyyMMddHHmmss}.xlsx"
+                    FileName = $"file-mau-{template.Code}-{DateTime.Now:yyyyMMddHHmmss}.xlsx"
                 };
-                response.Message = "Xuất file thành công";
+            }
+            catch (Exception ex)
+            {
+                response.IsSuccess = false;
+                response.Message = ex.Message;
+            }
+
+            return response;
+        }
+        public async Task<BaseResponse<List<CompareTemplateOptionDto>>> GetTemplateOptionsAsync()
+        {
+            var response = new BaseResponse<List<CompareTemplateOptionDto>>();
+
+            try
+            {
+                var data = await _dbContext.CompareTemplates
+                    .Where(x => x.IsActive)
+                    .GroupBy(x => x.ObjectId)
+                    .Select(g => new CompareTemplateOptionDto
+                    {
+                        ObjectId = g.Key,
+                        Name = g.First().Name
+                    })
+                    .OrderBy(x => x.ObjectId)
+                    .ToListAsync();
+
+                response.IsSuccess = true;
+                response.Data = data;
+                response.Message = "Lấy danh sách template thành công";
+            }
+            catch (Exception ex)
+            {
+                response.IsSuccess = false;
+                response.Message = ex.Message;
+            }
+
+            return response;
+        }
+        public async Task<BaseResponse<DynamicComparePreviewResultDto>> CompareReview(IFormFile file, long objectId)
+        {
+            var response = new BaseResponse<DynamicComparePreviewResultDto>();
+
+            try
+            {
+                ValidateFile(file);
+
+                var template = await GetTemplateAsync(objectId);
+
+                using var package = new ExcelPackage(file.OpenReadStream());
+                var sheet = package.Workbook.Worksheets.FirstOrDefault();
+
+                if (sheet == null)
+                    throw new Exception("File Excel không có sheet dữ liệu.");
+
+                var rows = ReadExcelByTemplate(sheet, template);
+
+                await ProcessCompareByTemplate(rows, template);
+
+                response.IsSuccess = true;
+                response.Message = "Đối soát dữ liệu thành công";
+                response.Data = new DynamicComparePreviewResultDto
+                {
+                    TotalRows = rows.Count,
+                    SuccessRows = rows.Count(x => x.IsValid),
+                    ErrorRows = rows.Count(x => !x.IsValid),
+                    DisplayColumns = BuildDisplayColumns(template),
+                    Rows = rows
+                };
             }
             catch (Exception ex)
             {
@@ -60,138 +127,383 @@ namespace TranNgoc.Services
             return response;
         }
 
-        public async Task<BaseResponse<ComparePreviewResultDto>> CompareReview(IFormFile file, long objectId)
+        public async Task<BaseResponse<CompareExcelResultDto>> ExportExcel(IFormFile file, long objectId)
         {
-            var res = new BaseResponse<ComparePreviewResultDto>();
+            var response = new BaseResponse<CompareExcelResultDto>();
 
             try
             {
+                ValidateFile(file);
+
+                var template = await GetTemplateAsync(objectId);
+
                 using var package = new ExcelPackage(file.OpenReadStream());
-                var sheet = package.Workbook.Worksheets.First();
+                var sheet = package.Workbook.Worksheets.FirstOrDefault();
 
-                var rows = await ProcessCompare(sheet, objectId);
+                if (sheet == null)
+                    throw new Exception("File Excel không có sheet dữ liệu.");
 
-                var data = new ComparePreviewResultDto
+                var rows = ReadExcelByTemplate(sheet, template);
+
+                await ProcessCompareByTemplate(rows, template);
+
+                WriteResultToExcel(sheet, rows, template);
+
+                response.IsSuccess = true;
+                response.Message = "Xuất file thành công";
+                response.Data = new CompareExcelResultDto
                 {
-                    TotalRows = rows.Count,
-                    SuccessRows = rows.Count(x => x.IsValid),
-                    ErrorRows = rows.Count(x => !x.IsValid),
-                    Rows = rows
+                    FileBytes = package.GetAsByteArray(),
+                    FileName = $"ket-qua-doi-soat-{DateTime.Now:yyyyMMddHHmmss}.xlsx"
                 };
-
-                res.Data = data;
-                res.Message = "Đối soát dữ liệu thành công";
             }
             catch (Exception ex)
             {
-                res.IsSuccess = false;
-                res.Message = ex.Message;
+                response.IsSuccess = false;
+                response.Message = ex.Message;
             }
 
-            return res;
+            return response;
         }
 
-        private async Task<List<CompareRowResultDto>> ProcessCompare(ExcelWorksheet worksheet, long objectId)
+        private async Task<CompareTemplate> GetTemplateAsync(long objectId)
         {
-            var rows = new List<CompareRowResultDto>();
+            var template = await _dbContext.CompareTemplates
+                .Include(x => x.Columns)
+                .Include(x => x.RuleConfigs)
+                .FirstOrDefaultAsync(x => x.ObjectId == objectId && x.IsActive);
+
+            if (template == null)
+                throw new Exception("Chưa cấu hình template đối soát cho objectId này.");
+
+            if (!template.Columns.Any())
+                throw new Exception("Template chưa cấu hình cột Excel.");
+
+            return template;
+        }
+
+        private List<DynamicCompareRowDto> ReadExcelByTemplate(ExcelWorksheet worksheet, CompareTemplate template)
+        {
+            var rows = new List<DynamicCompareRowDto>();
             var lastRow = worksheet.Dimension?.End.Row ?? 0;
+
+            var columns = template.Columns
+                .OrderBy(x => x.ExcelIndex)
+                .ToList();
 
             for (int rowIndex = 2; rowIndex <= lastRow; rowIndex++)
             {
-                if (IsEmptyRow(worksheet, rowIndex))
-                    continue;
-
-                var row = new CompareRowResultDto
+                var row = new DynamicCompareRowDto
                 {
-                    RowIndex = rowIndex,
-                    SoKm = TryGetDecimal(worksheet.Cells[rowIndex, 2].Text),
-                    TrongTai = TryGetDecimal(worksheet.Cells[rowIndex, 3].Text),
-                    DonGiaImport = TryGetDecimal(worksheet.Cells[rowIndex, 4].Text),
-                    TrongLuongBocXep = TryGetDecimal(worksheet.Cells[rowIndex, 5].Text),
-                    PhiBocXepImport = TryGetDecimal(worksheet.Cells[rowIndex, 6].Text),
-                    QuaDem = TryGetDecimal(worksheet.Cells[rowIndex, 7].Text),
+                    RowIndex = rowIndex
                 };
 
-                // ===== VALIDATE =====
-                if (row.SoKm == null)
-                    row.Errors.Add("Số KM không hợp lệ");
+                var hasValue = false;
 
-                if (row.TrongTai == null)
-                    row.Errors.Add("Trọng tải không hợp lệ");
-
-                if (row.DonGiaImport == null)
-                    row.Errors.Add("Đơn giá không hợp lệ");
-
-                if (row.SoKm != null && row.TrongTai != null && row.DonGiaImport != null)
+                foreach (var col in columns)
                 {
-                    var master = await FindMasterDataAsync(objectId, row.SoKm.Value, row.TrongTai.Value);
+                    var text = worksheet.Cells[rowIndex, col.ExcelIndex].Text?.Trim();
 
-                    if (master == null)
+                    row.RawValues[col.ColumnKey] = text;
+
+                    if (!string.IsNullOrWhiteSpace(text))
+                        hasValue = true;
+
+                    if (string.IsNullOrWhiteSpace(text))
                     {
-                        row.Errors.Add("Không có dữ liệu chuẩn");
+                        row.Values[col.ColumnKey] = null;
+
+                        if (col.IsRequired)
+                            row.Errors.Add($"{col.ColumnName} không được để trống");
+
+                        continue;
+                    }
+
+                    if (col.DataType.Equals("number", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var number = TryGetDecimal(text);
+
+                        row.Values[col.ColumnKey] = number;
+
+                        if (number == null)
+                            row.Errors.Add($"{col.ColumnName} không hợp lệ");
                     }
                     else
                     {
-                        row.DonGiaChuan = master.Price;
-
-                        if (row.DonGiaImport != master.Price)
-                            row.Errors.Add("Sai đơn giá");
+                        row.Values[col.ColumnKey] = text;
                     }
                 }
 
-                if (row.TrongLuongBocXep != null && row.PhiBocXepImport != null)
-                {
-                    row.PhiBocXepChuan = row.TrongLuongBocXep.Value * 100000;
-
-                    if (row.PhiBocXepImport != row.PhiBocXepChuan)
-                        row.Errors.Add("Sai phí bốc xếp");
-                }
-
-                if (row.QuaDem != null)
-                {
-                    row.PhiQuaDemChuan = row.QuaDem.Value * 800000;
-                }
-                else
-                {
-                    row.Errors.Add("Qua đêm không hợp lệ");
-                }
-
-                row.IsValid = !row.Errors.Any();
-
-                rows.Add(row);
+                if (hasValue)
+                    rows.Add(row);
             }
 
             return rows;
         }
 
-        private async Task<MasterData?> FindMasterDataAsync(long objectId, decimal soKm, decimal trongTai)
+        private async Task ProcessCompareByTemplate(List<DynamicCompareRowDto> rows, CompareTemplate template)
         {
-            var expectedUnit = soKm <= 12 ? "PER_TRIP" : "PER_KM";
+            switch (template.Code)
+            {
+                case "DISTANCE_WEIGHT":
+                    await CompareDistanceWeightAsync(rows, template);
+                    break;
 
-            return await _dbContext.MasterData
-                .Where(x =>
-                    x.ObjectId == objectId &&
-                    x.IsActive &&
-                    x.Unit == expectedUnit &&
-                    (x.DistanceFromKm == null || x.DistanceFromKm <= soKm) &&
-                    (x.DistanceToKm == null || x.DistanceToKm >= soKm) &&
-                    (x.TonFrom == null || x.TonFrom < trongTai) &&
-                    (x.TonTo == null || x.TonTo >= trongTai)
-                )
-                .OrderByDescending(x => x.DistanceFromKm ?? 0)
-                .ThenByDescending(x => x.TonFrom ?? 0)
-                .FirstOrDefaultAsync();
+                case "ROUTE_FIXED":
+                    await CompareRouteFixedAsync(rows, template);
+                    break;
+
+                default:
+                    throw new Exception($"Template chưa được hỗ trợ: {template.Code}");
+            }
         }
 
-        private bool IsEmptyRow(ExcelWorksheet worksheet, int rowIndex)
+        private async Task CompareDistanceWeightAsync(List<DynamicCompareRowDto> rows, CompareTemplate template)
         {
-            for (int col = 1; col <= 7; col++)
+            var masterData = await _dbContext.CompareMasterData
+                .Where(x => x.TemplateId == template.Id && x.IsActive)
+                .ToListAsync();
+
+            var config = template.RuleConfigs
+                .Where(x => x.IsActive)
+                .ToDictionary(x => x.ConfigKey, x => x.ConfigValue);
+
+            var loadingUnitPrice = GetConfigDecimal(config, "loading_unit_price", 100000);
+            var overnightUnitPrice = GetConfigDecimal(config, "overnight_unit_price", 800000);
+
+            foreach (var row in rows)
             {
-                if (!string.IsNullOrWhiteSpace(worksheet.Cells[rowIndex, col].Text))
-                    return false;
+                if (row.Errors.Any())
+                    continue;
+
+                var soKm = GetDecimal(row, "so_km");
+                var trongTai = GetDecimal(row, "trong_tai");
+                var donGiaImport = GetDecimal(row, "don_gia");
+
+                if (soKm == null || trongTai == null || donGiaImport == null)
+                    continue;
+
+                var master = masterData.FirstOrDefault(x =>
+                {
+                    using var doc = JsonDocument.Parse(x.DataJson);
+                    var json = doc.RootElement;
+
+                    var distanceFrom = GetJsonDecimal(json, "distanceFromKm");
+                    var distanceTo = GetJsonDecimal(json, "distanceToKm");
+                    var tonFrom = GetJsonDecimal(json, "tonFrom");
+                    var tonTo = GetJsonDecimal(json, "tonTo");
+
+                    return
+                        (distanceFrom == null || distanceFrom <= soKm) &&
+                        (distanceTo == null || distanceTo >= soKm) &&
+                        (tonFrom == null || tonFrom < trongTai) &&
+                        (tonTo == null || tonTo >= trongTai);
+                });
+
+                if (master == null)
+                {
+                    row.Errors.Add("Không tìm thấy dữ liệu chuẩn");
+                    continue;
+                }
+
+                row.StandardPrice = master.Price;
+                if (master.Price == null)
+                {
+                    row.Errors.Add("Dữ liệu chuẩn chưa cấu hình giá");
+                    continue;
+                }
+                if (donGiaImport != master.Price)
+                    row.Errors.Add($"Sai đơn giá. Giá chuẩn: {master.Price:N0}");
+
+                var trongLuongBocXep = GetDecimal(row, "trong_luong_boc_xep");
+                var phiBocXepImport = GetDecimal(row, "phi_boc_xep");
+
+                if (trongLuongBocXep != null && phiBocXepImport != null)
+                {
+                    row.StandardLoadingFee = trongLuongBocXep.Value * loadingUnitPrice;
+
+                    if (phiBocXepImport != row.StandardLoadingFee)
+                        row.Errors.Add($"Sai phí bốc xếp. Phí chuẩn: {row.StandardLoadingFee:N0}");
+                }
+
+                var quaDem = GetDecimal(row, "qua_dem");
+
+                if (quaDem != null)
+                {
+                    row.StandardOvernightFee = quaDem.Value * overnightUnitPrice;
+                }
+            }
+        }
+
+        private async Task CompareRouteFixedAsync(List<DynamicCompareRowDto> rows, CompareTemplate template)
+        {
+            var masterData = await _dbContext.CompareMasterData
+                .Where(x => x.TemplateId == template.Id && x.IsActive)
+                .ToListAsync();
+
+            foreach (var row in rows)
+            {
+                if (row.Errors.Any())
+                    continue;
+
+                var origin = GetText(row, "origin");
+                var destination = GetText(row, "destination");
+                var soKm = GetDecimal(row, "so_km");
+                var donGiaImport = GetDecimal(row, "don_gia");
+
+                if (string.IsNullOrWhiteSpace(origin) ||
+                    string.IsNullOrWhiteSpace(destination) ||
+                    donGiaImport == null)
+                {
+                    continue;
+                }
+
+                var master = masterData.FirstOrDefault(x =>
+                {
+                    using var doc = JsonDocument.Parse(x.DataJson);
+                    var json = doc.RootElement;
+
+                    var masterOrigin = GetJsonText(json, "origin");
+                    var masterDestination = GetJsonText(json, "destination");
+
+                    return NormalizeText(masterOrigin) == NormalizeText(origin)
+                        && NormalizeText(masterDestination) == NormalizeText(destination);
+                });
+
+                if (master == null)
+                {
+                    row.Errors.Add("Không tìm thấy tuyến chuẩn");
+                    continue;
+                }
+
+                row.StandardPrice = master.Price;
+
+                if (donGiaImport != master.Price)
+                    row.Errors.Add($"Sai đơn giá. Giá chuẩn: {master.Price:N0}");
+
+                using var masterDoc = JsonDocument.Parse(master.DataJson);
+                var masterDistance = GetJsonDecimal(masterDoc.RootElement, "distanceKm");
+
+                if (soKm != null && masterDistance != null && soKm != masterDistance)
+                    row.Errors.Add($"Sai số KM. KM chuẩn: {masterDistance}");
+            }
+        }
+
+        private void WriteResultToExcel(ExcelWorksheet sheet, List<DynamicCompareRowDto> rows, CompareTemplate template)
+        {
+            var lastInputColumn = template.Columns.Max(x => x.ExcelIndex);
+
+            var hasLoadingFee = template.Columns.Any(x => x.ColumnKey == "phi_boc_xep");
+            var hasOvernight = template.Columns.Any(x => x.ColumnKey == "qua_dem");
+
+            var colIndex = lastInputColumn + 1;
+
+            var resultCol = colIndex++;
+            var standardPriceCol = colIndex++;
+
+            int? standardLoadingFeeCol = null;
+            int? standardOvernightFeeCol = null;
+
+            if (hasLoadingFee)
+                standardLoadingFeeCol = colIndex++;
+
+            if (hasOvernight)
+                standardOvernightFeeCol = colIndex++;
+
+            var errorCol = colIndex;
+
+            sheet.Cells[1, resultCol].Value = "Kết quả";
+            sheet.Cells[1, standardPriceCol].Value = "Giá chuẩn";
+
+            if (standardLoadingFeeCol.HasValue)
+                sheet.Cells[1, standardLoadingFeeCol.Value].Value = "Phí bốc xếp chuẩn";
+
+            if (standardOvernightFeeCol.HasValue)
+                sheet.Cells[1, standardOvernightFeeCol.Value].Value = "Phí qua đêm chuẩn";
+
+            sheet.Cells[1, errorCol].Value = "Thông tin lỗi";
+
+            foreach (var row in rows)
+            {
+                sheet.Cells[row.RowIndex, resultCol].Value = row.IsValid ? "Đúng" : "Sai";
+                sheet.Cells[row.RowIndex, standardPriceCol].Value = row.StandardPrice;
+
+                if (standardLoadingFeeCol.HasValue)
+                    sheet.Cells[row.RowIndex, standardLoadingFeeCol.Value].Value = row.StandardLoadingFee;
+
+                if (standardOvernightFeeCol.HasValue)
+                    sheet.Cells[row.RowIndex, standardOvernightFeeCol.Value].Value = row.StandardOvernightFee;
+
+                sheet.Cells[row.RowIndex, errorCol].Value = string.Join("; ", row.Errors);
             }
 
-            return true;
+            sheet.Cells[sheet.Dimension.Address].AutoFitColumns();
+        }
+
+        private decimal? GetDecimal(DynamicCompareRowDto row, string key)
+        {
+            if (!row.Values.TryGetValue(key, out var value))
+                return null;
+
+            return value as decimal?;
+        }
+
+        private string? GetText(DynamicCompareRowDto row, string key)
+        {
+            if (!row.Values.TryGetValue(key, out var value))
+                return null;
+
+            return value?.ToString();
+        }
+
+        private decimal GetConfigDecimal(Dictionary<string, string> config, string key, decimal defaultValue)
+        {
+            if (!config.TryGetValue(key, out var value))
+                return defaultValue;
+
+            return TryGetDecimal(value) ?? defaultValue;
+        }
+
+        private decimal? GetJsonDecimal(JsonElement json, string key)
+        {
+            if (!json.TryGetProperty(key, out var prop))
+                return null;
+
+            if (prop.ValueKind == JsonValueKind.Null)
+                return null;
+
+            if (prop.ValueKind == JsonValueKind.Number && prop.TryGetDecimal(out var value))
+                return value;
+
+            if (prop.ValueKind == JsonValueKind.String)
+                return TryGetDecimal(prop.GetString());
+
+            return null;
+        }
+
+        private string? GetJsonText(JsonElement json, string key)
+        {
+            if (!json.TryGetProperty(key, out var prop))
+                return null;
+
+            return prop.ValueKind == JsonValueKind.Null ? null : prop.ToString();
+        }
+
+        private string NormalizeText(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return string.Empty;
+
+            return string.Join(" ", value
+                .Trim()
+                .ToUpperInvariant()
+                .Replace(",", "")
+                .Replace(".", "")
+                .Replace("-", " ")
+                .Replace("\r", " ")
+                .Replace("\n", " ")
+                .Replace("\t", " ")
+                .Split(' ', StringSplitOptions.RemoveEmptyEntries));
         }
 
         private decimal? TryGetDecimal(string? value)
@@ -210,29 +522,16 @@ namespace TranNgoc.Services
                 .Replace(",", "")
                 .Replace(" ", "");
 
-            if (decimal.TryParse(value, out var result))
+            if (decimal.TryParse(value, NumberStyles.Any, CultureInfo.InvariantCulture, out var result))
+                return result;
+
+            if (decimal.TryParse(value, NumberStyles.Any, CultureInfo.CurrentCulture, out result))
                 return result;
 
             return null;
         }
 
-        private void MarkErrorCell(ExcelRange cell)
-        {
-            cell.Style.Fill.PatternType = ExcelFillStyle.Solid;
-            cell.Style.Fill.BackgroundColor.SetColor(Color.LightPink);
-            cell.Style.Font.Color.SetColor(Color.DarkRed);
-            cell.Style.Font.Bold = true;
-        }
-
-        private void MarkSuccessCell(ExcelRange cell)
-        {
-            cell.Style.Fill.PatternType = ExcelFillStyle.Solid;
-            cell.Style.Fill.BackgroundColor.SetColor(Color.LightGreen);
-            cell.Style.Font.Color.SetColor(Color.DarkGreen);
-            cell.Style.Font.Bold = true;
-        }
-
-        public async Task<List<ImportCompareExcelRowDto>> ImportExcelAsync(IFormFile file)
+        private void ValidateFile(IFormFile file)
         {
             if (file == null || file.Length == 0)
                 throw new Exception("File Excel không hợp lệ.");
@@ -240,86 +539,75 @@ namespace TranNgoc.Services
             var extension = Path.GetExtension(file.FileName).ToLower();
 
             if (extension != ".xlsx")
-                throw new Exception("EPPlus khuyến nghị dùng file .xlsx.");
+                throw new Exception("Chỉ hỗ trợ file .xlsx.");
+        }
 
-            await using var stream = new MemoryStream();
-            await file.CopyToAsync(stream);
-            stream.Position = 0;
-
-            using var package = new ExcelPackage(stream);
-            var worksheet = package.Workbook.Worksheets.FirstOrDefault();
-
-            if (worksheet == null)
-                throw new Exception("File Excel không có sheet dữ liệu.");
-
-            var rows = new List<ImportCompareExcelRowDto>();
-
-            var firstDataRow = 2;
-            var lastRow = worksheet.Dimension?.End.Row ?? 0;
-
-            for (int rowIndex = firstDataRow; rowIndex <= lastRow; rowIndex++)
-            {
-                if (IsEmptyRow(worksheet, rowIndex))
-                    continue;
-
-                var item = new ImportCompareExcelRowDto
+        private List<CompareDisplayColumnDto> BuildDisplayColumns(CompareTemplate template)
+        {
+            var columns = template.Columns
+                .OrderBy(x => x.ExcelIndex)
+                .Select(x => new CompareDisplayColumnDto
                 {
-                    RowIndex = rowIndex,
-                    Stt = TryGetInt(worksheet.Cells[rowIndex, 1].Text),
-                    SoKm = TryGetDecimal(worksheet.Cells[rowIndex, 2].Text),
-                    TrongTaiTinhPhi = TryGetDecimal(worksheet.Cells[rowIndex, 3].Text),
-                    DonGia = TryGetDecimal(worksheet.Cells[rowIndex, 4].Text),
-                    TrongLuongBocXep = TryGetDecimal(worksheet.Cells[rowIndex, 5].Text),
-                    PhiBocXep = TryGetDecimal(worksheet.Cells[rowIndex, 6].Text),
-                    QuaDem = TryGetDecimal(worksheet.Cells[rowIndex, 7].Text)
-                };
+                    ColumnKey = x.ColumnKey,
+                    ColumnName = x.ColumnName,
+                    Group = "IMPORT",
+                    DataType = x.DataType,
+                    Align = x.DataType == "number" ? "right" : "left"
+                })
+                .ToList();
 
-                ValidateRow(item);
-                rows.Add(item);
+            columns.Add(new CompareDisplayColumnDto
+            {
+                ColumnKey = "standardPrice",
+                ColumnName = "Đơn giá chuẩn",
+                Group = "STANDARD",
+                DataType = "number",
+                Align = "right"
+            });
+
+            if (template.Columns.Any(x => x.ColumnKey == "phi_boc_xep"))
+            {
+                columns.Add(new CompareDisplayColumnDto
+                {
+                    ColumnKey = "standardLoadingFee",
+                    ColumnName = "Phí BX chuẩn",
+                    Group = "STANDARD",
+                    DataType = "number",
+                    Align = "right"
+                });
             }
 
-            return rows;
-        }
+            if (template.Columns.Any(x => x.ColumnKey == "qua_dem"))
+            {
+                columns.Add(new CompareDisplayColumnDto
+                {
+                    ColumnKey = "standardOvernightFee",
+                    ColumnName = "Phí qua đêm chuẩn",
+                    Group = "STANDARD",
+                    DataType = "number",
+                    Align = "right"
+                });
+            }
 
-        private void ValidateRow(ImportCompareExcelRowDto row)
-        {
-            if (row.SoKm == null)
-                row.Errors.Add("Số KM không hợp lệ.");
+            columns.Add(new CompareDisplayColumnDto
+            {
+                ColumnKey = "result",
+                ColumnName = "Kết quả",
+                Group = "RESULT",
+                DataType = "text",
+                Align = "center"
+            });
 
-            if (row.TrongTaiTinhPhi == null)
-                row.Errors.Add("Trọng tải tính phí không hợp lệ.");
+            columns.Add(new CompareDisplayColumnDto
+            {
+                ColumnKey = "errors",
+                ColumnName = "Lỗi",
+                Group = "RESULT",
+                DataType = "text",
+                Align = "left"
+            });
 
-            if (row.DonGia == null)
-                row.Errors.Add("Đơn giá không hợp lệ.");
-
-            row.IsValid = row.Errors.Count == 0;
-        }
-
-        private int? TryGetInt(string? value)
-        {
-            if (string.IsNullOrWhiteSpace(value))
-                return null;
-
-            value = NormalizeNumber(value);
-
-            if (int.TryParse(value, out var result))
-                return result;
-
-            return null;
-        }
-
-        private string NormalizeNumber(string value)
-        {
-            return value
-                .Trim()
-                .Replace("VND", "", StringComparison.OrdinalIgnoreCase)
-                .Replace("VNĐ", "", StringComparison.OrdinalIgnoreCase)
-                .Replace("đ", "", StringComparison.OrdinalIgnoreCase)
-                .Replace("km", "", StringComparison.OrdinalIgnoreCase)
-                .Replace("ton", "", StringComparison.OrdinalIgnoreCase)
-                .Replace("tấn", "", StringComparison.OrdinalIgnoreCase)
-                .Replace(",", "")
-                .Replace(" ", "");
+            return columns;
         }
     }
 }
